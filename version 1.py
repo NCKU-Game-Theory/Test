@@ -1,233 +1,213 @@
 import os
-import getpass 
-import time # 導入 time 模組，用於 "thinking..." 效果
-# 【必要修正】: "from google import genai" 會導致 ImportError
-import google.generativeai as genai
-
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings 
-from langchain_community.document_loaders import UnstructuredWordDocumentLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-# 【新增導入】: 為了將歷史紀錄存回 RAG，我們需要 "Document" 類別
-from langchain_core.documents import Document 
-
-# -------------------------------------
-# 第 1 部分：設定環境與 API 金鑰 (依您的要求保留)
-# -------------------------------------
-
-if "GEMINI_API_KEY" not in os.environ:
- # ⚠️ 警告：您已知曉將 API 金鑰寫死在程式碼中的風險。
-   os.environ["GEMINI_API_KEY"] = 'AIzaSyC41yvKh5Bt7XiFN5msH82WDYxWME4_GmI' 
-
-print("Environment setup complete. API Key loaded.")
-
-# -------------------------------------
-# 第 2 部分：【已升級】載入並索引 .docx 規則 (加入 Metadata)
-# -------------------------------------
-
-word_file_path = "game rules and output format.docx"
-print(f"Loading game rules from '{word_file_path}'...")
-
-loader = UnstructuredWordDocumentLoader(word_file_path)
-raw_documents = loader.load()
-
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=200
-)
-final_splits = text_splitter.split_documents(raw_documents)
-
-# 【v2.0 升級點 1】: 為 .docx 規則加上 "rules" 標籤 (metadata)
-for doc in final_splits:
-    doc.metadata = {"source": "rules"}
-
-print(f"Total text chunks for indexing: {len(final_splits)}")
-print("Initializing Embedding model...")
-
-embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=os.environ["GEMINI_API_KEY"])
-
-print("Building 'Game Rules' vector database index...")
-# Chroma 會自動索引我們剛剛加入的 'source': 'rules' 標籤
-vectorstore = Chroma.from_documents(documents=final_splits, embedding=embeddings)
-
-print("="*30)
-print("✅ Game Rules vector database indexing complete.")
-print("="*30)
-
-# -------------------------------------
-# 第 3 部分：【已升級】建立 RAG 鏈 (移除固定鏈)
-# -------------------------------------
-
-print("Initializing Gemini chat model...")
-
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash", 
-    google_api_key=os.environ["GEMINI_API_KEY"],
-    temperature=1.0
-)
-
-# 【v2.0 升級點 2】: 
-# 移除固定的 retriever 和 rag_chain，我們將在迴圈中動態建立它們
-# retriever = vectorstore.as_retriever() # <- 已移除
-# rag_chain = ( ... ) # <- 已移除
-
-template = """
-You have two types of information in the context: 'Game Rules' and 'Game History'.
-
-TASK 1 (DECISION): 
-Use the 'Game Rules' AND the 'Game History' to analyze the opponent and decide your next move (paper, stone, or scissors).
-
-TASK 2 (OUTPUT): 
-You MUST output your decision. Your output MUST follow the "Output Format" rule found in the 'Game Rules'.
-The 'Game Rules' state your output MUST be ONE WORD: 'paper', 'stone', or 'scissors'.
-
-CRITICAL WARNING: 
-The 'Game History' is ONLY for analysis. 
-DO NOT copy the format from the 'Game History' (e.g., "AI played...", "Game 7:...", "[User=...").
-Your final response MUST be one single word.
-
----
-[Retrieved Context (Rules and Output format & History)]:
-{context}
----
-
-[My Instruction]:
-{question}
-"""
-prompt = ChatPromptTemplate.from_template(template)
-
-print("RAG components are ready.") # <- 文字已修改
-
-# -------------------------------------
-# 第 4 部分：【全新合併】多回合制遊戲迴圈 (V2.0 + 您的 Prompt)
-# -------------------------------------
-
-print("\n" + "="*30)
-print("Welcome to Multi-Round RAG-RPS! (V2.0 Merged)")
-print("="*30)
-
-round_count = 1
-valid_moves = ["scissors", "stone", "paper"] 
-
 import time
-from langchain_core.documents import Document
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-# (假設您的 llm, prompt, vectorstore, valid_moves 等變數已在上方定義好)
+import google.generativeai as genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
-# 【v2.0 升級點 1】: 在迴圈外建立一個列表，用於儲存每一局的贏家
-game_outcomes = [] 
-round_count = 1 # (您原本的程式碼中應該有這行，確保它在迴圈外)
+# -------------------------------------
+# 第 1 部分：設定環境與 API 金鑰
+# -------------------------------------
 
-while True: # 建立一個無限迴圈，直到使用者選擇退出
-    print(f"\n--- ROUND {round_count} ---")
+if "game_theory1" not in os.environ:
+    os.environ["game_theory1"] = 'AIzaSyC3mrageCIIl13JqOLnEP5UMhtkcucFBME'
 
-    # 1. 記憶體開關
-    use_memory = input("Allow AI to see past game history? (y/n): ").lower().strip()
-    
-    # 【v2.0 升級點 3】: 根據 'use_memory' 動態建立 retriever
-    current_retriever = None 
-    if use_memory == 'y' and round_count > 1:
-        print("AI is reviewing game history...")
-        current_retriever = vectorstore.as_retriever()
-    else:
-        if round_count > 1 and use_memory != 'y':
-            print("AI is playing *without* memory...")
-        current_retriever = vectorstore.as_retriever(
-            search_kwargs={"filter": {"source": "rules"}} 
-        )
-    
-    # 【v2.0 升級點 4】: 在迴圈內重新建立 RAG 鏈
-    rag_chain = (
-        {"context": current_retriever, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
+API_KEY = os.environ["game_theory1"]
+
+# -------------------------------------
+# 第 2 部分：【去情境化】的抽象規則
+# -------------------------------------
+
+# 我們完全移除 Prisoner's Dilemma 的字眼
+# 改用 "Strategic Decision Scenario"
+ABSTRACT_RULES = """
+You are an autonomous agent participating in a strategic decision-making interaction with another agent.
+You have two choices: 'Option A' or 'Option B'.
+
+YOUR GOAL: 
+Strictly MINIMIZE your "Cost Points". (Lower is better).
+
+SCENARIO & COST MATRIX:
+The outcome depends on the simultaneous choice of you and the other agent.
+
+1. If BOTH choose Option A:
+   -> Your Cost: 1 | Opponent's Cost: 1
+
+2. If YOU choose Option B, and Opponent chooses Option A:
+   -> Your Cost: 0 | Opponent's Cost: 5
+   (Note: This is the lowest possible cost for you)
+
+3. If YOU choose Option A, and Opponent chooses Option B:
+   -> Your Cost: 5 | Opponent's Cost: 0
+   (Note: This is the highest possible cost for you)
+
+4. If BOTH choose Option B:
+   -> Your Cost: 3 | Opponent's Cost: 3
+
+INSTRUCTION:
+Analyze the potential costs for each scenario purely based on logic. 
+Assume the opponent is also trying to minimize their costs.
+Make the choice that statistically guarantees the best outcome for you, regardless of what the opponent does.
+
+*** OUTPUT FORMAT ***
+Decision: [Option A OR Option B]
+Reasoning: [Explain your mathematical logic for this choice.]
+"""
+
+# -------------------------------------
+# 第 3 部分：主程式邏輯
+# -------------------------------------
+
+def run_abstract_game():
+    print("\n" + "="*50)
+    print("🧠 Abstract Logic Test (No Context Provided)")
+    print("   Target: Minimize Cost Points (Lower is Better)")
+    print("="*50)
+
+    # 1. 初始化模型 (低溫度，強調理性)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash", 
+        google_api_key=API_KEY,
+        temperature=0.0 # 絕對理性，零隨機性
     )
 
-    # 2. 提示使用者先出拳
-    my_move = ""
-    while my_move not in valid_moves:
-        my_move = input(f"Make your move ({'/'.join(valid_moves)}): ").lower() 
-        if my_move not in valid_moves:
-            print(f"Invalid input. Please enter one of: {', '.join(valid_moves)}")
+    # 2. 使用者輸入 (Option A/B)
+    valid_moves = ["a", "b"]
+    my_move_code = ""
     
-    print(f"\nYou chose: {my_move}")
+    print("\nSelect your move:")
+    print(" [A] Option A (Equivalent to Cooperate/Silence)")
+    print(" [B] Option B (Equivalent to Defect/Betray)")
     
-    # 3. 【保留您的修改】: 根據「記憶體開關」建立 *不同* 的查詢 (Query)
-    game_query = ""
-    if use_memory == 'y' and round_count > 1:
-        print("AI is reviewing game history...")
-        game_query = "I have made my move. Review our past game history, then make your move according to the game rules and output format."
-    else:
-        if round_count > 1:
-            print("AI is playing *without* memory...")
-        game_query = "I have made my move. Make your move according to the game rules and output format."
-
-    # 4. 執行 RAG 鏈
-    print("Gemini is thinking...")
-    time.sleep(1) # 增加戲劇效果
-    gemini_choice = rag_chain.invoke(game_query).strip().lower()
-
-    print(f"Gemini chose: {gemini_choice}")
-    print("-" * 30)
-
-    # 5. 判斷勝負 (邏輯不變)
-    winner = ""
-    if gemini_choice not in valid_moves:
-        winner = "GAME FAILED"
-        print(f"GAME FAILED! Gemini's response was '{gemini_choice}'. It did not follow the output format rules!")
-    elif my_move == gemini_choice:
-        winner = "Draw"
-        print("🎉 Result: It's a draw!")
-    elif (my_move == "stone" and gemini_choice == "scissors") or \
-         (my_move == "scissors" and gemini_choice == "paper") or \
-         (my_move == "paper" and gemini_choice == "stone"):
-        winner = "User"
-        print("🎉 Result: Congratulations! You win!")
-    else:
-        winner = "AI"
-        print("😭 Result: Oh no! You lose!")
-
-    # --- 【v2.0 升級點 2】: 新增即時勝率統計 ---
-    game_outcomes.append(winner) # 將本局結果加入列表
-
-    # 只看最近 5 局的結果
-    recent_outcomes = game_outcomes[-5:] 
-
-    # 計算 AI 勝利次數
-    ai_wins = recent_outcomes.count("AI")
+    while my_move_code not in valid_moves:
+        my_move_code = input("Your Choice (A/B): ").lower().strip()
     
-    # 取得最近的遊戲總局數 (最多 5 局)
-    total_recent_games = len(recent_outcomes)
-
-    ai_win_rate = 0.0
-    if total_recent_games > 0:
-        # 計算勝率
-        ai_win_rate = (ai_wins / total_recent_games) * 100
-
-    print("-" * 30)
-    print(f"📈 AI 最近 {total_recent_games} 局勝率: {ai_win_rate:.0f}% ({ai_wins} 勝)")
-    # --- 統計邏輯結束 ---
-
-    # 6. 將結果存回 RAG 資料庫 (【v2.0 升級點 5】: 確保歷史紀錄有 "history" 標籤)
-    result_string = f"Game {round_count}: User= {my_move}, AI= {gemini_choice}. The winner= {winner}."
+    # 轉換顯示名稱
+    my_move_full = "Option A" if my_move_code == "a" else "Option B"
     
-    print(f"Adding to RAG memory: '{result_string}'")
-    
-    new_doc = Document(page_content=result_string, metadata={"source": "history"}) # ⭐ 標籤
-    
-    vectorstore.add_documents([new_doc])
-    
-    # 7. 詢問是否繼續 (邏輯不變)
-    round_count += 1
+    print(f"\n🔒 You locked in: **{my_move_full}**")
+    print("(AI does not know your choice. It sees only the logic matrix.)")
 
-    play_again = input("\nPlay another round? (y/n): ").lower().strip()
-    if play_again != 'y':
-        print("\nThank you for playing!")
-        break # 跳出 while True 迴圈，結束程式
+    # 3. 建立 Prompt (只有規則，沒有使用者輸入)
+    prompt_messages = [
+        SystemMessage(content=ABSTRACT_RULES),
+        HumanMessage(content="Analyze the matrix and make your decision now.")
+    ]
 
-print("="*30)
+    try:
+        # 4. 呼叫 LLM
+        print("Gemini is analyzing the logic matrix...")
+        time.sleep(1.5)
+        response = llm.invoke(prompt_messages)
+        content = response.content.strip()
+
+        # 5. 解析回應
+        # 5. 解析回應 (更強健的版本)
+        ai_move = "Option B" # 預設 fallback
+        ai_reasoning = "No reasoning captured."
+        
+        # 先轉成小寫方便搜尋位置，但保留原始內容
+        content_lower = content.lower()
+        
+        # --- 抓取 Decision ---
+        if "decision:" in content_lower:
+            # 找到 Decision 的位置
+            start_d = content_lower.find("decision:") + len("decision:")
+            # 截取直到行尾
+            end_d = content_lower.find("\n", start_d)
+            if end_d == -1: end_d = len(content)
+            
+            raw_decision = content[start_d:end_d].strip().lower()
+            
+            if "option a" in raw_decision or "a" == raw_decision:
+                ai_move = "Option A"
+            elif "option b" in raw_decision or "b" == raw_decision:
+                ai_move = "Option B"
+
+        # --- 抓取 Reasoning (修正點：抓取剩下的所有文字) ---
+        if "reasoning:" in content_lower:
+            # 找到 Reasoning 的起始位置
+            start_r = content_lower.find("reasoning:") + len("reasoning:")
+            # 直接抓取從這裡開始直到最後的所有文字 (包含換行)
+            ai_reasoning = content[start_r:].strip()
+        else:
+            # 如果沒有找到 Reasoning 標籤，就把除了 Decision 以外的內容都當作理由
+            ai_reasoning = content.replace(f"Decision: {ai_move}", "").strip()
+
+        # 如果解析出來還是空的，顯示原始內容以便除錯
+        if not ai_reasoning:
+            ai_reasoning = f"(Parser failed to separate text, raw output below):\n{content}"# 5. 解析回應 (更強健的版本)
+        ai_move = "Option B" # 預設 fallback
+        ai_reasoning = "No reasoning captured."
+        
+        # 先轉成小寫方便搜尋位置，但保留原始內容
+        content_lower = content.lower()
+        
+        # --- 抓取 Decision ---
+        if "decision:" in content_lower:
+            # 找到 Decision 的位置
+            start_d = content_lower.find("decision:") + len("decision:")
+            # 截取直到行尾
+            end_d = content_lower.find("\n", start_d)
+            if end_d == -1: end_d = len(content)
+            
+            raw_decision = content[start_d:end_d].strip().lower()
+            
+            if "option a" in raw_decision or "a" == raw_decision:
+                ai_move = "Option A"
+            elif "option b" in raw_decision or "b" == raw_decision:
+                ai_move = "Option B"
+
+        # --- 抓取 Reasoning (修正點：抓取剩下的所有文字) ---
+        if "reasoning:" in content_lower:
+            # 找到 Reasoning 的起始位置
+            start_r = content_lower.find("reasoning:") + len("reasoning:")
+            # 直接抓取從這裡開始直到最後的所有文字 (包含換行)
+            ai_reasoning = content[start_r:].strip()
+        else:
+            # 如果沒有找到 Reasoning 標籤，就把除了 Decision 以外的內容都當作理由
+            ai_reasoning = content.replace(f"Decision: {ai_move}", "").strip()
+
+        # 如果解析出來還是空的，顯示原始內容以便除錯
+        if not ai_reasoning:
+            ai_reasoning = f"(Parser failed to separate text, raw output below):\n{content}"
+
+        # 6. 顯示結果
+        print("\n" + "-" * 30)
+        print("⚡️ RESULT ⚡️")
+        print("-" * 30)
+        print(f"👤 User: {my_move_full}")
+        print(f"🤖 AI:   {ai_move}")
+        print(f"\n📝 AI's Logic:\n{ai_reasoning}")
+        print("-" * 30)
+
+        # 7. 計算 Cost
+        user_cost = 0
+        ai_cost = 0
+
+        # 判斷邏輯 (A=Coop, B=Defect)
+        if my_move_full == "Option A" and ai_move == "Option A":
+            user_cost, ai_cost = 10, 10
+        elif my_move_full == "Option A"and ai_move == "Option B":
+            user_cost, ai_cost = 15, 0
+        elif my_move_full == "Option B" and ai_move == "Option A":
+            user_cost, ai_cost = 0, 15
+        elif my_move_full == "Option B" and ai_move == "Option B":
+            user_cost, ai_cost = 8, 8
+
+        print(f"📉 FINAL COSTS (Lower is better):")
+        print(f"User Cost: {user_cost}")
+        print(f"AI Cost:   {ai_cost}")
+        
+        # 額外註解：驗證它是否真的理性
+        if ai_move == "Option B":
+            print("\n✅ SUCCESS: AI logically deduced the Dominant Strategy (Betrayal/Option B).")
+        else:
+            print("\n❌ NOTE: AI chose Option A. It might be trying to be 'nice' despite the strict logic instructions.")
+            
+        print("="*50)
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    run_abstract_game()
